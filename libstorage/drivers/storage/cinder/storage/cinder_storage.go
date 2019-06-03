@@ -152,10 +152,6 @@ func (d *driver) Init(context types.Context, config gofig.Config) error {
 		return goof.WithFieldsE(fields, "error getting newComputeV2", err)
 	}
 
-	if d.clientBlockStorage, err = openstack.NewBlockStorageV1(d.provider, endpointOpts); err != nil {
-		return goof.WithFieldsE(fields, "error getting newBlockStorageV1", err)
-	}
-
 	d.clientBlockStoragev2, err = openstack.NewBlockStorageV2(d.provider, endpointOpts)
 	if err != nil {
 		// fallback to volume v1
