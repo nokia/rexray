@@ -166,7 +166,7 @@ func (d *driver) Init(context types.Context, config gofig.Config) error {
 
 func openstackHTTPClient(caCert string, insecure bool) (http.Client, error) {
 	if caCert == "" {
-		return http.Client{}, nil
+		return http.Client{Timeout: time.Second * 60,}, nil
 	}
 
 	caCertPool := x509.NewCertPool()
