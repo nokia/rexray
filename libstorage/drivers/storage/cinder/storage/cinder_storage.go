@@ -230,7 +230,7 @@ func (d *driver) Volumes(
 		var volumesRet []*types.Volume
 		for _, volumeOS := range volumesOS {
 			volumesRet = append(volumesRet, translateVolume(
-				&volumeOS, opts.Attachments))
+				&volumeOS, opts.Attachments, false))
 		}
 
 		return volumesRet, nil
@@ -250,7 +250,7 @@ func (d *driver) Volumes(
 	var volumesRet []*types.Volume
 	for _, volumeOS := range volumesOS {
 		volumesRet = append(volumesRet, translateVolumeV1(
-			&volumeOS, opts.Attachments))
+			&volumeOS, opts.Attachments, false))
 	}
 
 	return volumesRet, nil
@@ -276,8 +276,7 @@ func (d *driver) VolumeInspect(
 			return nil,
 				goof.WithFieldsE(fields, "error getting volume", err)
 		}
-
-		return translateVolume(volume, opts.Attachments), nil
+		return translateVolume(volume, opts.Attachments, true), nil
 	}
 
 	volume, err := volumesv1.Get(d.clientBlockStorage, volumeID).Extract()
@@ -287,20 +286,30 @@ func (d *driver) VolumeInspect(
 			goof.WithFieldsE(fields, "error getting volume", err)
 	}
 
-	return translateVolumeV1(volume, opts.Attachments), nil
+	return translateVolumeV1(volume, opts.Attachments, true), nil
 }
 
 func translateVolumeV1(
 	volume *volumesv1.Volume,
-	includeAttachments types.VolumeAttachmentsTypes) *types.Volume {
+	includeAttachments types.VolumeAttachmentsTypes,
+	resolveLocalDeviceName bool) *types.Volume {
 
 	var attachments []*types.VolumeAttachment
 	if includeAttachments.Requested() {
 		for _, attachment := range volume.Attachments {
+			var deviceName = attachment["device"].(string)
+			if resolveLocalDeviceName {
+				var err error
+				deviceName, err = resolveDeviceName(attachment["device"].(string))
+				if err != nil {
+					deviceName = "unknown"
+				}
+			}
+
 			libstorageAttachment := &types.VolumeAttachment{
 				VolumeID:   attachment["volume_id"].(string),
 				InstanceID: &types.InstanceID{ID: attachment["server_id"].(string), Driver: cinder.Name},
-				DeviceName: resolveDeviceName(attachment["volume_id"].(string), attachment["device"].(string)),
+				DeviceName: deviceName,
 				Status:     "",
 			}
 			attachments = append(attachments, libstorageAttachment)
@@ -321,15 +330,25 @@ func translateVolumeV1(
 
 func translateVolume(
 	volume *volumes.Volume,
-	includeAttachments types.VolumeAttachmentsTypes) *types.Volume {
+	includeAttachments types.VolumeAttachmentsTypes,
+	resolveLocalDeviceName bool) *types.Volume {
 
 	var attachments []*types.VolumeAttachment
 	if includeAttachments.Requested() {
 		for _, attachment := range volume.Attachments {
+			var deviceName = attachment.Device
+			if resolveLocalDeviceName {
+				var err error
+				deviceName, err = resolveDeviceName(attachment.VolumeID)
+				if err != nil {
+					deviceName = "unknown"
+				}
+			}
+
 			libstorageAttachment := &types.VolumeAttachment{
 				VolumeID:   attachment.VolumeID,
 				InstanceID: &types.InstanceID{ID: attachment.ServerID, Driver: cinder.Name},
-				DeviceName: resolveDeviceName(attachment.VolumeID, attachment.Device),
+				DeviceName: deviceName,
 				Status:     "",
 			}
 			attachments = append(attachments, libstorageAttachment)
@@ -560,7 +579,7 @@ func (d *driver) createVolume(
 					"error waiting for volume creation to complete", err)
 		}
 
-		return translateVolume(volume, types.VolumeAttachmentsRequested), nil
+		return translateVolume(volume, types.VolumeAttachmentsRequested, true), nil
 	}
 
 	volume, err := volumesv1.Create(d.clientBlockStorage, options).Extract()
@@ -579,7 +598,7 @@ func (d *driver) createVolume(
 				"error waiting for volume creation to complete", err)
 	}
 
-	return translateVolumeV1(volume, types.VolumeAttachmentsRequested), nil
+	return translateVolumeV1(volume, types.VolumeAttachmentsRequested, true), nil
 }
 
 func (d *driver) VolumeRemove(
@@ -658,7 +677,7 @@ func (d *driver) VolumeAttach(
 		options.Device = *opts.NextDevice
 	}
 
-	volumeAttach, err := volumeattach.Create(d.clientCompute, iid.ID, options).Extract()
+	_, err = volumeattach.Create(d.clientCompute, iid.ID, options).Extract()
 	if err != nil {
 		return nil, "", goof.WithFieldsE(
 			fields, "error attaching volume", err)
@@ -671,26 +690,25 @@ func (d *driver) VolumeAttach(
 			fields, "error waiting for volume to attach", err)
 	}
 
-	return volume, resolveDeviceName(volumeID, volumeAttach.Device), nil
-}
-
-func getDeviceLink(
-	volumeID string) string {
-
-	return fmt.Sprintf("/dev/disk/by-id/virtio-%s", volumeID[:20])
-}
-
-func resolveDeviceName(
-	volumeID string,
-	deviceName string) string {
-
-	attachedDeviceLink := getDeviceLink(volumeID)
-	attachedDeviceName, err := filepath.EvalSymlinks(attachedDeviceLink)
+	deviceName, err := resolveDeviceName(volumeID)
 	if err != nil {
-		return deviceName
+		return nil, "", goof.WithFieldsE(
+			fields, "error resolving device name for volume", err)
 	}
 
-	return attachedDeviceName
+	return volume, deviceName, nil
+}
+
+// Resolve the device name by matching the volume IDs to the virtio-XXXXXXXX-XXXX-XXXX-X-symlinks
+// created under /dev/disk/by-id
+func resolveDeviceName(volumeID string) (string, error) {
+	attachedDeviceLink := getDeviceLink(volumeID)
+	attachedDeviceName, err := filepath.EvalSymlinks(attachedDeviceLink)
+	return attachedDeviceName, err
+}
+
+func getDeviceLink(volumeID string) string {
+	return fmt.Sprintf("/dev/disk/by-id/virtio-%s", volumeID[:20])
 }
 
 func (d *driver) VolumeDetach(
